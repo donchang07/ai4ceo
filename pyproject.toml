@@ -1,0 +1,85 @@
+[project]
+name = "ai4ceo"
+version = "1.0"
+description = "CEO를 위한 AI coding school"
+authors = [{name = "장동인", email = "donchang0725@gmail.com"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = "==3.13.1"
+
+# --- 핵심 종속성 (ref.py, app1.py, app2.py 실행에 필요한 패키지만 포함) ---
+dependencies = [
+    # 기본 LLM SDK
+    "anthropic>=0.34.0",
+    "google-generativeai>=0.7.2",
+    # LangChain 핵심 패키지
+    "langchain>=1.2.6,<2.0",
+    "langchain-classic",
+    "langchain-core>=1.2.6,<2.0",
+    "langchain-community>=0.4,<0.5",
+    "langchain-experimental",
+    "langchain-mcp-adapters",
+    "langchain-openai>=1.1.6,<2.0",
+    "langchain-anthropic>=1.3.1,<2.0",
+    "langchain-google-genai>=4.2.0,<5.0",
+    "langchain-perplexity",
+    "langchain-upstage>=0.6.0",
+    "langchain-text-splitters>=1.0.0,<2.0",
+    "langgraph",
+    "langgraph-checkpoint",
+    "langgraph-prebuilt",
+    "langgraph-sdk",
+    # OpenAI 및 벡터 스토어
+    "openai>=2.0,<3.0",
+    "faiss-cpu>=1.8.0",
+    # Streamlit 및 웹 프레임워크
+    "streamlit>=1.53.0",
+    "streamlit-shortcuts>=1.2.0",
+    "starlette",
+    "uvicorn",
+    "websockets",
+    # 데이터 처리
+    "pandas>=2.2.2",
+    "numpy>=2.2.2",
+    "pytz",
+    # 머신러닝
+    "scikit-learn>=1.6.0",
+    # 데이터베이스
+    "sqlalchemy>=2.0.31",
+    "supabase>=2.10.0,<3.0",
+    # PDF 처리 (ref.py의 PyPDFLoader용)
+    "pypdf>=4.2.0",
+    "pdfplumber",
+    "pdfminer.six",
+    "unstructured[pdf]",
+    "pymupdf",
+    # 시각화 (app1.py용)
+    "plotly>=6.5.0",
+    "matplotlib>=3.10.1",
+    "wordcloud>=1.9.5",
+    # 오디오/음성 유틸
+    "pydub",
+    # 유틸리티
+    "bcrypt",
+    "mcp",
+    "nest-asyncio",
+    "python-dotenv>=1.1.0",
+    "pydantic>=2.10.6",
+    "tiktoken",
+    # 웹 검색
+    "duckduckgo-search>=8.1.1",
+    "beautifulsoup4>=4.14.3",
+    "requests>=2.32.3",
+    "langchain-ollama>=1.0.1",
+    "rank-bm25",
+    # 금융 데이터
+    "yfinance",
+]
+
+# --- UV 전용 설정: 패키지 빌드 에러 방지 ---
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

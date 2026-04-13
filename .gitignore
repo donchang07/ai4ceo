@@ -1,0 +1,58 @@
+# Secrets — never commit
+.env
+.env.*
+!.env-sample
+.streamlit/secrets.toml
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Testing / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs and local runtime
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE (JetBrains; VS Code 설정은 팀에서 공유할 경우 제외)
+.idea/
+
+# Local app / game state (프로젝트 루트 기준)
+.tetris_highscore.json
+
+# Claude Code — 로컬 설정·히스토리 (공유 설정은 .claude/settings.json 등만 커밋)
+.claude/settings.local.json
+.claude/history/
+
+# uv: uv.lock 은 재현 가능한 빌드를 위해 보통 커밋함 (무시하지 않음)

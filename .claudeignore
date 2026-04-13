@@ -1,0 +1,45 @@
+# Secrets and local env (never send to context)
+.env
+.env.*
+!.env-sample
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Logs and local artifacts
+logs/
+*.log
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code — 로컬 전용 (컨텍스트·저장소 모두 제외)
+.claude/settings.local.json
+.claude/history/
+
+# Optional: large local binaries or dumps (uncomment if needed)
+# *.pdf
+# *.zip
