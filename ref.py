@@ -29,7 +29,6 @@ _disable_langsmith_remote()
 
 import streamlit as st
 import tempfile
-import ssl
 from dotenv import load_dotenv
 
 # LangChain 임포트 전에 .env 로드 및 LangSmith 비활성화 재적용
@@ -52,38 +51,6 @@ from datetime import datetime
 import logging
 import re
 
-# SSL 인증서 검증 문제 해결을 위한 전역 설정
-# (api.openai.com은 뚫려 있으나, SDK 초기화 시 발생할 수 있는 부가 통신 차단 방지)
-os.environ["PYTHONHTTPSVERIFY"] = "0"
-try:
-    ssl._create_default_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-
-# OpenAI API 키 로드 함수
-def get_openai_api_key() -> str:
-    """OpenAI API 키를 .env 파일에서 명시적으로 로드합니다."""
-    # 프로젝트 루트 디렉토리 찾기
-    current_file = os.path.abspath(__file__)
-    project_root = os.path.dirname(current_file)
-    env_path = os.path.join(project_root, ".env")
-    
-    # .env 파일이 없으면 현재 작업 디렉토리에서 찾기
-    if not os.path.exists(env_path):
-        env_path = os.path.join(os.getcwd(), ".env")
-    
-    if os.path.exists(env_path):
-        from dotenv import dotenv_values
-        env_vars = dotenv_values(env_path)
-        api_key = env_vars.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    else:
-        api_key = os.getenv("OPENAI_API_KEY")
-    
-    if not api_key:
-        logger.warning("OPENAI_API_KEY를 찾을 수 없음")
-    
-    return api_key
-
 
 # 로깅 설정
 log_dir = "logs"
@@ -101,6 +68,16 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+# OpenAI API 키 로드 함수 (.env는 이미 모듈 상단에서 load_dotenv()로 로드됨)
+def get_openai_api_key() -> str:
+    """환경 변수에서 OpenAI API 키를 반환합니다."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.warning("OPENAI_API_KEY를 찾을 수 없음")
+    return api_key
+
 
 # HTTP 요청 로그 비활성화
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -129,17 +106,70 @@ def remove_separators(text: str) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
+# 후속 질문 생성 함수
+def generate_follow_up_questions(prompt: str, response_text: str, llm) -> list[str]:
+    """답변을 기반으로 후속 질문 3개를 생성합니다."""
+    try:
+        next_questions_prompt = f"""
+        질문자가 한 질문: {prompt}
+
+        생성된 답변:
+        {response_text}
+
+        위 질문과 답변 내용을 검토하여, 질문자가 다음에 할 수 있는 중요한 3가지 질문을 생성해주세요.
+
+        요구사항:
+        - 답변 내용을 더 깊이 이해하기 위한 후속 질문
+        - 답변에서 언급된 내용을 구체화하거나 확장하는 질문
+        - 관련된 다른 주제나 관점을 탐색할 수 있는 질문
+        - 각 질문은 완전한 문장으로 작성하되, 간결하고 명확하게 작성
+        - 질문은 번호 없이 순서대로 나열하되, 각 질문은 별도의 줄에 작성
+
+        형식:
+        질문1
+        질문2
+        질문3
+
+        참고: 질문만 작성하고, 설명이나 추가 텍스트는 포함하지 마세요.
+        """
+        response = llm.invoke([{"role": "user", "content": next_questions_prompt}])
+        content = response.content if hasattr(response, 'content') else str(response)
+        questions = [q.strip() for q in content.strip().split('\n') if q.strip() and not q.strip().startswith('#')]
+        return questions[:3]
+    except Exception as e:
+        logger.warning(f"다음 질문 생성 실패: {e}")
+        return []
+
+
+def format_follow_up_questions(questions: list[str]) -> str:
+    """후속 질문 리스트를 마크다운 문자열로 포맷합니다."""
+    if not questions:
+        return ""
+    result = "\n\n### 💡 다음에 물어볼 수 있는 질문들\n\n"
+    for i, question in enumerate(questions, 1):
+        result += f"{i}. {question}\n\n"
+    return result
+
+
 # LLM 모델 함수 (gpt-5.2 고정)
-def get_llm(temperature: float = 0.7, api_key: str = None) -> Any:
-    """gpt-5.2 모델을 반환합니다."""
-    # API 키가 제공되지 않으면 .env 파일에서 로드
-    if api_key is None:
-        api_key = get_openai_api_key()
-    
+@st.cache_resource
+def get_llm(temperature: float = 0.7, _api_key: str = None) -> Any:
+    """gpt-5.2 모델을 반환합니다. @st.cache_resource로 캐싱됩니다."""
+    api_key = _api_key or get_openai_api_key()
+
     if not api_key:
         raise ValueError("OPENAI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
-    
+
     return ChatOpenAI(model="gpt-5.2", temperature=temperature, api_key=api_key)
+
+
+@st.cache_resource
+def get_embeddings(_api_key: str = None) -> OpenAIEmbeddings:
+    """OpenAI 임베딩 모델을 반환합니다. @st.cache_resource로 캐싱됩니다."""
+    api_key = _api_key or get_openai_api_key()
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY가 설정되지 않았습니다.")
+    return OpenAIEmbeddings(openai_api_key=api_key)
 
 # 페이지 설정
 st.set_page_config(
@@ -404,19 +434,17 @@ with st.sidebar:
         if process_button:
             with st.spinner("PDF 파일을 처리 중입니다..."):
                 try:
-                    # 임시 파일 생성 및 처리
-                    temp_dir = tempfile.TemporaryDirectory()
-                    
+                  with tempfile.TemporaryDirectory() as temp_dir_path:
                     all_docs = []
                     new_files = []
-                    
+
                     # 각 파일 처리
                     for uploaded_file in uploaded_files:
                         # 이미 처리된 파일 스킵
                         if uploaded_file.name in st.session_state.processed_files:
                             continue
                             
-                        temp_file_path = os.path.join(temp_dir.name, uploaded_file.name)
+                        temp_file_path = os.path.join(temp_dir_path, uploaded_file.name)
                         
                         # 업로드된 파일을 임시 파일로 저장
                         with open(temp_file_path, "wb") as f:
@@ -455,9 +483,9 @@ with st.sidebar:
                                    "`.env` 파일에 `OPENAI_API_KEY=your_api_key_here` 형식으로 API 키를 추가해주세요.")
                             logger.error("OPENAI_API_KEY가 환경 변수에 설정되지 않음")
                         else:
-                            # 임베딩 및 벡터 스토어 생성 (명시적으로 API 키 전달)
+                            # 임베딩 모델 (캐싱됨)
                             try:
-                                embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+                                embeddings = get_embeddings(_api_key=openai_api_key)
                             except Exception as e:
                                 st.error("**OpenAI API 키 초기화 중 오류가 발생했습니다.**\n\n"
                                        "API 키를 확인해주세요.")
@@ -555,7 +583,7 @@ with st.sidebar:
                         if st.session_state.vectorstore is not None:
                             st.session_state.retriever = st.session_state.vectorstore.as_retriever(
                                 search_type="similarity",
-                                search_kwargs={"k": 10}  # 검색 결과 수 증가
+                                search_kwargs={"k": 3}
                             )
                             
                             # 처리된 파일 목록 업데이트
@@ -565,8 +593,7 @@ with st.sidebar:
                             st.error("벡터 스토어가 생성되지 않아 파일을 처리할 수 없습니다.")
                         
                 except Exception as e:
-                    st.error(f"파일 처리 중 오류가 발생했습니다: {str(e)}")
-                    st.error("파일이 손상되었거나 지원되지 않는 형식일 수 있습니다.")
+                    st.error("파일 처리 중 오류가 발생했습니다. 파일이 손상되었거나 지원되지 않는 형식일 수 있습니다.")
                     logger.error(f"PDF 파일 처리 오류: {e}")
 
     # 처리된 파일 목록 표시
@@ -627,56 +654,20 @@ if prompt := st.chat_input("질문을 입력하세요"):
                 response_text = remove_separators(response_text)
                 
                 # 다음 질문 3개 생성 (gpt-5.2 사용)
-                try:
-                    openai_api_key = get_openai_api_key()
-                    if openai_api_key:
-                        llm = get_llm(temperature=1, api_key=openai_api_key)
-                        next_questions_prompt = f"""
-                        질문자가 한 질문: {prompt}
-                        
-                        생성된 답변:
-                        {response_text}
-                        
-                        위 질문과 답변 내용을 검토하여, 질문자가 다음에 할 수 있는 중요한 3가지 질문을 생성해주세요.
-                        
-                        요구사항:
-                        - 답변 내용을 더 깊이 이해하기 위한 후속 질문
-                        - 답변에서 언급된 내용을 구체화하거나 확장하는 질문
-                        - 관련된 다른 주제나 관점을 탐색할 수 있는 질문
-                        - 각 질문은 완전한 문장으로 작성하되, 간결하고 명확하게 작성
-                        - 질문은 번호 없이 순서대로 나열하되, 각 질문은 별도의 줄에 작성
-                        
-                        형식:
-                        질문1
-                        질문2
-                        질문3
-                        
-                        참고: 질문만 작성하고, 설명이나 추가 텍스트는 포함하지 마세요.
-                        """
-                        next_questions_response = llm.invoke([{"role": "user", "content": next_questions_prompt}])
-                        if hasattr(next_questions_response, 'content'):
-                            next_questions_text = next_questions_response.content
-                        else:
-                            next_questions_text = str(next_questions_response)
-                        next_questions = [q.strip() for q in next_questions_text.strip().split('\n') if q.strip() and not q.strip().startswith('#')]
-                        next_questions = next_questions[:3]
-                        
-                        if next_questions:
-                            response_text += "\n\n"
-                            response_text += "### 💡 다음에 물어볼 수 있는 질문들\n\n"
-                            for i, question in enumerate(next_questions, 1):
-                                response_text += f"{i}. {question}\n\n"
-                    else:
-                        logger.warning("OPENAI_API_KEY가 없어 다음 질문 생성을 건너뜁니다.")
-                except Exception as e:
-                    logger.warning(f"다음 질문 생성 실패: {e}")
+                openai_api_key = get_openai_api_key()
+                if openai_api_key:
+                    llm = get_llm(temperature=1, _api_key=openai_api_key)
+                    questions = generate_follow_up_questions(prompt, response_text, llm)
+                    response_text += format_follow_up_questions(questions)
+                else:
+                    logger.warning("OPENAI_API_KEY가 없어 다음 질문 생성을 건너뜁니다.")
 
                 with st.chat_message("assistant"):
                     st.markdown(response_text)
                 st.session_state.chat_history.append({"role": "assistant", "content": response_text})
 
             except Exception as e:
-                error_msg = f"web_search 검색 중 오류: {e}"
+                error_msg = "web_search 검색 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
                 st.error(error_msg)
                 st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
                 logger.error(f"web_search 검색 오류: {e}")
@@ -693,15 +684,12 @@ if prompt := st.chat_input("질문을 입력하세요"):
                     if not retrieved_docs:
                         response = f"죄송합니다. '{prompt}'에 대한 관련 문서를 찾을 수 없습니다."
                     else:
-                        # 상위 3개 문서만 사용
-                        top_docs = retrieved_docs[:3]
-                        
-                        # 컨텍스트 구성
+                        # 컨텍스트 구성 (retriever가 이미 k=3으로 제한)
                         context_text = ""
                         max_context_length = 8000
                         current_length = 0
-                        
-                        for i, doc in enumerate(top_docs):
+
+                        for i, doc in enumerate(retrieved_docs):
                             doc_text = f"[문서 {i+1}]\n{doc.page_content}\n\n"
                             if current_length + len(doc_text) > max_context_length:
                                 st.warning(f"토큰 제한으로 인해 문서 {i+1}개만 사용합니다.")
@@ -713,49 +701,54 @@ if prompt := st.chat_input("질문을 입력하세요"):
                         conversation_context = ""
                         if st.session_state.conversation_memory:
                             conversation_context = "\n\n=== 이전 대화 맥락 ===\n"
-                            # 최근 50개 대화 사용
-                            recent_conversations = st.session_state.conversation_memory[-50:]
+                            # 최근 15개 대화 사용
+                            recent_conversations = st.session_state.conversation_memory[-15:]
                             for conv in recent_conversations:
                                 conversation_context += f"{conv}\n"
                             conversation_context += "=== 대화 맥락 끝 ===\n"
                         
-                        # 시스템 프롬프트 구성
-                        system_prompt = f"""
-                        질문: {prompt}
-                        
-                        관련 문서:
-                        {context_text}{conversation_context}
-                        
-                        위 문서 내용과 이전 대화 맥락을 모두 고려하여 질문에 답변해주세요.
-                        이전 대화에서 언급된 내용이 있다면 그것을 참조하여 더 정확하고 맥락적인 답변을 제공하세요.
-                        
-                        답변 형식:
-                        - 답변은 반드시 제목과 본문으로 구분하여 작성하세요
-                        - 제목(# H1)은 질문의 핵심을 짧고 명확하게 요약한 한 문장으로 작성하세요 (최대 20자 이내 권장)
-                        - 제목 다음에 빈 줄을 하나 두고 본문을 작성하세요
-                        - 본문은 ## (H2)와 ### (H3) 헤딩을 사용하여 구조화하세요
-                        - 본문은 서술형으로 작성하되 존대말을 사용하세요
-                        - 개조식이나 불완전한 문장을 사용하지 말고, 완전한 문장으로 서술하세요
-                        
-                        주의사항:
-                        - 답변 중간에 (문서1), (문서2) 같은 참조 표시를 하지 마세요
-                        - "참조 문서:", "제공된 문서", "문서 1, 문서 2" 같은 문구를 사용하지 마세요
-                        - 답변은 순수한 내용만 포함하고, 참조 관련 문구는 전혀 포함하지 마세요
-                        - 답변 끝에 참조 정보나 출처 관련 문구를 추가하지 마세요
-                        - 답변 중간에 구분선(---, ===, ___)을 사용하지 마세요
-                        - 마크다운 구분선이나 선을 그리는 기호를 절대 사용하지 마세요
-                        - 취소선(~~텍스트~~)을 사용하지 마세요. 삭제된 내용을 표시하지 마세요
-                        - 수정된 내용을 표시할 때 취소선이나 선을 그어서 표시하지 마세요
-                        """
-                        
+                        # 메시지 구성 (시스템 + 사용자 분리)
+                        system_msg = """당신은 RAG(검색 증강 생성) 기반 어시스턴트입니다.
+사용자가 업로드한 PDF 문서에서 검색된 내용이 아래에 제공됩니다.
+반드시 제공된 문서 내용을 기반으로 답변하세요. 문서에 내용이 있으면 "파일이 제공되지 않았다"고 말하지 마세요.
+
+답변 형식:
+- 답변은 반드시 제목과 본문으로 구분하여 작성하세요
+- 제목(# H1)은 질문의 핵심을 짧고 명확하게 요약한 한 문장으로 작성하세요 (최대 20자 이내 권장)
+- 제목 다음에 빈 줄을 하나 두고 본문을 작성하세요
+- 본문은 ## (H2)와 ### (H3) 헤딩을 사용하여 구조화하세요
+- 본문은 서술형으로 작성하되 존대말을 사용하세요
+- 개조식이나 불완전한 문장을 사용하지 말고, 완전한 문장으로 서술하세요
+
+주의사항:
+- 답변 중간에 (문서1), (문서2) 같은 참조 표시를 하지 마세요
+- "참조 문서:", "제공된 문서", "문서 1, 문서 2" 같은 문구를 사용하지 마세요
+- 답변은 순수한 내용만 포함하고, 참조 관련 문구는 전혀 포함하지 마세요
+- 답변 끝에 참조 정보나 출처 관련 문구를 추가하지 마세요
+- 답변 중간에 구분선(---, ===, ___)을 사용하지 마세요
+- 마크다운 구분선이나 선을 그리는 기호를 절대 사용하지 마세요
+- 취소선(~~텍스트~~)을 사용하지 마세요"""
+
+                        user_msg = f"""다음은 PDF 문서에서 검색된 내용입니다:
+
+{context_text}{conversation_context}
+
+위 문서 내용을 기반으로 다음 질문에 답변해주세요:
+{prompt}"""
+
+                        messages = [
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": user_msg},
+                        ]
+
                         # LLM으로 답변 생성 (스트리밍 모드)
                         llm = get_llm(temperature=1)
-                        
+
                         response = ""
                         with st.chat_message("assistant"):
                             stream_placeholder = st.empty()
                             # 스트리밍으로 답변 생성
-                            for chunk in llm.stream(system_prompt):
+                            for chunk in llm.stream(messages):
                                 if hasattr(chunk, 'content'):
                                     chunk_text = chunk.content
                                 else:
@@ -764,67 +757,31 @@ if prompt := st.chat_input("질문을 입력하세요"):
                                 # 실시간으로 표시 (구분선 제거 포함)
                                 cleaned_response = remove_separators(response)
                                 stream_placeholder.markdown(cleaned_response)
-                        
-                        # 답변에서 구분선 제거
-                        response = remove_separators(response)
-                    
-                        # 다음 질문 3개 생성
-                        next_questions_prompt = f"""
-                        질문자가 한 질문: {prompt}
-                        
-                        생성된 답변:
-                        {response}
-                        
-                        위 질문과 답변 내용을 검토하여, 질문자가 다음에 할 수 있는 중요한 3가지 질문을 생성해주세요.
-                        
-                        요구사항:
-                        - 답변 내용을 더 깊이 이해하기 위한 후속 질문
-                        - 답변에서 언급된 내용을 구체화하거나 확장하는 질문
-                        - 관련된 다른 주제나 관점을 탐색할 수 있는 질문
-                        - 각 질문은 완전한 문장으로 작성하되, 간결하고 명확하게 작성
-                        - 질문은 번호 없이 순서대로 나열하되, 각 질문은 별도의 줄에 작성
-                        
-                        형식:
-                        질문1
-                        질문2
-                        질문3
-                        
-                        참고: 질문만 작성하고, 설명이나 추가 텍스트는 포함하지 마세요.
-                        """
-                        
-                        try:
-                            next_questions_response = llm.invoke(next_questions_prompt).content
-                            # 질문들을 리스트로 파싱
-                            next_questions = [q.strip() for q in next_questions_response.strip().split('\n') if q.strip() and not q.strip().startswith('#')]
-                            # 최대 3개만 선택
-                            next_questions = next_questions[:3]
-                            
-                            # 답변 끝에 다음 질문 추가
-                            if next_questions:
-                                response += "\n\n"
-                                response += "### 💡 다음에 물어볼 수 있는 질문들\n\n"
-                                for i, question in enumerate(next_questions, 1):
-                                    response += f"{i}. {question}\n\n"
-                                # 다음 질문 추가 후 다시 표시
-                                with st.chat_message("assistant"):
-                                    st.markdown(response)
-                        except Exception as e:
-                            # 다음 질문 생성 실패 시 무시하고 원래 답변만 표시
-                            logger.warning(f"다음 질문 생성 실패: {e}")
+
+                            # 답변에서 구분선 제거
+                            response = remove_separators(response)
+
+                            # 다음 질문 3개 생성 후 같은 메시지 블록에 추가
+                            questions = generate_follow_up_questions(prompt, response, llm)
+                            follow_up_text = format_follow_up_questions(questions)
+                            if follow_up_text:
+                                response += follow_up_text
+                            stream_placeholder.markdown(response)
                         
                         # 대화 기록에 추가
                         st.session_state.chat_history.append({"role": "assistant", "content": response})
                         
-                        # 대화 맥락 메모리에 추가 (최근 50개 대화 유지)
+                        # 대화 맥락 메모리에 추가 (최근 15개 대화 유지)
                         st.session_state.conversation_memory.append(f"사용자: {prompt}")
                         st.session_state.conversation_memory.append(f"AI: {response}")
-                        if len(st.session_state.conversation_memory) > 100:  # 50개 대화 = 100개 메시지
-                            st.session_state.conversation_memory = st.session_state.conversation_memory[-100:]
+                        if len(st.session_state.conversation_memory) > 30:  # 15개 대화 = 30개 메시지
+                            st.session_state.conversation_memory = st.session_state.conversation_memory[-30:]
                     
                 except Exception as e:
+                    error_msg = "답변 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
                     with st.chat_message("assistant"):
-                        st.write(f"오류가 발생했습니다: {str(e)}")
-                    st.session_state.chat_history.append({"role": "assistant", "content": f"오류가 발생했습니다: {str(e)}"})
+                        st.write(error_msg)
+                    st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
                     logger.error(f"RAG 답변 생성 오류: {e}")
 
         # RAG 모드: PDF 파일이 없는 경우
