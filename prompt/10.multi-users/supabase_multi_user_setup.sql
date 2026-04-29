@@ -1,165 +1,241 @@
--- Supabase 멀티유저 벡터 데이터베이스 설정 SQL
--- Supabase SQL Editor에서 실행하세요
+-- PDF 기반 멀티유저 멀티세션 RAG 챗봇용 초기 스키마
+-- 대상 앱: prompt/10.multi-users/multi-users-ref.py
+-- 실행 위치: Supabase SQL Editor
 
--- 1. pgvector 확장 활성화
-CREATE EXTENSION IF NOT EXISTS vector;
+create extension if not exists vector;
 
--- 2. embeddings 테이블 생성 (사용자별 분리)
-CREATE TABLE IF NOT EXISTS embeddings (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    user_id UUID NOT NULL,  -- 사용자 ID 추가
-    session_id TEXT NOT NULL,
-    file_name TEXT NOT NULL,
-    chunk_index INTEGER NOT NULL,
-    chunk_text TEXT NOT NULL,
-    embedding vector(1536),  -- OpenAI embeddings는 1536 차원
-    metadata JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(user_id, session_id, file_name, chunk_index)
+-- 기존 함수/테이블 정리
+drop function if exists public.match_documents(vector, double precision, integer, text);
+drop trigger if exists trg_sessions_updated_at on public.sessions;
+drop function if exists public.set_updated_at();
+drop table if exists public.messages cascade;
+drop table if exists public.documents cascade;
+drop table if exists public.sessions cascade;
+
+-- 세션 테이블 (사용자별 소유권 분리)
+create table public.sessions (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null unique,
+  user_id uuid not null references auth.users (id) on delete cascade,
+  title text default 'New Chat',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
--- 3. 인덱스 생성 (벡터 검색 성능 향상)
-CREATE INDEX IF NOT EXISTS embeddings_user_id_idx ON embeddings(user_id);
-CREATE INDEX IF NOT EXISTS embeddings_session_id_idx ON embeddings(session_id);
-CREATE INDEX IF NOT EXISTS embeddings_file_name_idx ON embeddings(file_name);
-CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING ivfflat (embedding vector_cosine_ops);
+-- 메시지 테이블
+create table public.messages (
+  id bigserial primary key,
+  session_id uuid not null references public.sessions (id) on delete cascade,
+  role text not null check (role in ('user', 'ai')),
+  content text not null,
+  created_at timestamptz not null default now()
+);
 
--- 4. 벡터 검색 함수 생성 (RPC) - 사용자별 필터링
-CREATE OR REPLACE FUNCTION match_documents(
-    query_embedding vector(1536),
-    match_threshold float DEFAULT 0.7,
-    match_count int DEFAULT 10,
-    user_id_filter UUID DEFAULT NULL,
-    session_id_filter text DEFAULT NULL
-)
-RETURNS TABLE (
-    id uuid,
-    user_id uuid,
-    session_id text,
-    file_name text,
-    chunk_index integer,
-    chunk_text text,
-    metadata jsonb,
-    similarity float
-)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        e.id,
-        e.user_id,
-        e.session_id,
-        e.file_name,
-        e.chunk_index,
-        e.chunk_text,
-        e.metadata,
-        1 - (e.embedding <=> query_embedding) AS similarity
-    FROM embeddings e
-    WHERE 
-        (user_id_filter IS NULL OR e.user_id = user_id_filter)
-        AND (session_id_filter IS NULL OR e.session_id = session_id_filter)
-        AND (1 - (e.embedding <=> query_embedding)) >= match_threshold
-    ORDER BY e.embedding <=> query_embedding
-    LIMIT match_count;
-END;
+-- 문서 임베딩 테이블 (OpenAI text-embedding-3-small: 1536차원)
+create table public.documents (
+  id bigserial primary key,
+  content text not null,
+  metadata jsonb default '{}'::jsonb,
+  embedding vector(1536) not null,
+  user_id text not null,
+  created_at timestamptz not null default now()
+);
+
+create index idx_sessions_user_updated on public.sessions (user_id, updated_at desc);
+create index idx_messages_session_id on public.messages (session_id);
+create index idx_documents_user_id on public.documents (user_id);
+create index idx_documents_metadata_session on public.documents ((metadata ->> 'session_id'));
+create index idx_documents_metadata_source on public.documents ((metadata ->> 'source'));
+
+create index if not exists idx_documents_embedding
+  on public.documents using hnsw (embedding vector_cosine_ops);
+
+create or replace function public.set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
 $$;
 
--- 5. sessions 테이블 생성 (사용자별 세션 관리)
-CREATE TABLE IF NOT EXISTS sessions (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    user_id UUID NOT NULL,  -- 사용자 ID 추가
-    session_id TEXT NOT NULL,
-    title TEXT,
-    chat_history TEXT,  -- JSON 문자열
-    conversation_memory TEXT,  -- JSON 문자열
-    processed_files TEXT,  -- JSON 문자열
-    metadata JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(user_id, session_id)
-);
+create trigger trg_sessions_updated_at
+before update on public.sessions
+for each row execute procedure public.set_updated_at();
 
--- 6. sessions 테이블 인덱스 생성
-CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS sessions_session_id_idx ON sessions(session_id);
-CREATE INDEX IF NOT EXISTS sessions_updated_at_idx ON sessions(updated_at DESC);
+-- 벡터 유사도 검색 RPC (앱의 SessionRetriever 시그니처와 동일해야 함)
+create or replace function public.match_documents(
+  query_embedding vector,
+  match_threshold double precision default 0.25,
+  match_count integer default 30,
+  filter_user_id text default null
+)
+returns table (
+  id bigint,
+  content text,
+  metadata jsonb,
+  similarity double precision
+)
+language sql
+stable
+as $$
+  select
+    d.id,
+    d.content,
+    d.metadata,
+    (1 - (d.embedding <=> query_embedding))::double precision as similarity
+  from public.documents d
+  where (filter_user_id is null or d.user_id = filter_user_id)
+    and (1 - (d.embedding <=> query_embedding)) >= match_threshold
+  order by d.embedding <=> query_embedding
+  limit match_count;
+$$;
 
--- 7. 세션 삭제 시 관련 임베딩도 삭제하는 트리거 함수
-CREATE OR REPLACE FUNCTION delete_session_embeddings()
-RETURNS TRIGGER AS $$
-BEGIN
-    DELETE FROM embeddings 
-    WHERE user_id = OLD.user_id AND session_id = OLD.session_id;
-    RETURN OLD;
-END;
-$$ LANGUAGE plpgsql;
+grant execute on function public.match_documents(vector, double precision, integer, text)
+  to anon, authenticated;
 
--- 8. 트리거 생성
-DROP TRIGGER IF EXISTS delete_embeddings_on_session_delete ON sessions;
-CREATE TRIGGER delete_embeddings_on_session_delete
-AFTER DELETE ON sessions
-FOR EACH ROW
-EXECUTE FUNCTION delete_session_embeddings();
+-- RLS 활성화
+alter table public.sessions enable row level security;
+alter table public.messages enable row level security;
+alter table public.documents enable row level security;
 
--- 9. RLS (Row Level Security) 정책 설정 (선택사항)
--- 사용자별 데이터 분리를 위해 RLS 활성화 권장
-ALTER TABLE embeddings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+-- Advisor 경고 대응: public.users가 존재하면 RLS + 최소 접근 정책 적용
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.tables
+    where table_schema = 'public' and table_name = 'users'
+  ) then
+    execute 'alter table public.users enable row level security';
+    execute 'revoke all on table public.users from anon, authenticated';
 
--- 기존 정책이 있으면 삭제
-DROP POLICY IF EXISTS "Users can view their own embeddings" ON embeddings;
-DROP POLICY IF EXISTS "Users can insert their own embeddings" ON embeddings;
-DROP POLICY IF EXISTS "Users can delete their own embeddings" ON embeddings;
-DROP POLICY IF EXISTS "Users can view their own sessions" ON sessions;
-DROP POLICY IF EXISTS "Users can insert their own sessions" ON sessions;
-DROP POLICY IF EXISTS "Users can update their own sessions" ON sessions;
-DROP POLICY IF EXISTS "Users can delete their own sessions" ON sessions;
+    execute 'drop policy if exists "users_select_own" on public.users';
+    execute 'drop policy if exists "users_update_own" on public.users';
 
--- 사용자가 자신의 데이터만 볼 수 있도록 정책 생성
-CREATE POLICY "Users can view their own embeddings"
-ON embeddings FOR SELECT
-USING (auth.uid() = user_id);
+    if exists (
+      select 1
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'users'
+        and column_name = 'id'
+        and udt_name = 'uuid'
+    ) then
+      execute $p$
+        create policy "users_select_own"
+          on public.users for select to authenticated
+          using (id = auth.uid())
+      $p$;
+      execute $p$
+        create policy "users_update_own"
+          on public.users for update to authenticated
+          using (id = auth.uid())
+          with check (id = auth.uid())
+      $p$;
+    end if;
+  end if;
+end $$;
 
-CREATE POLICY "Users can insert their own embeddings"
-ON embeddings FOR INSERT
-WITH CHECK (auth.uid() = user_id);
+-- 기존 정책 삭제
+drop policy if exists "sessions_select" on public.sessions;
+drop policy if exists "sessions_insert" on public.sessions;
+drop policy if exists "sessions_update" on public.sessions;
+drop policy if exists "sessions_delete" on public.sessions;
+drop policy if exists "messages_select" on public.messages;
+drop policy if exists "messages_insert" on public.messages;
+drop policy if exists "messages_update" on public.messages;
+drop policy if exists "messages_delete" on public.messages;
+drop policy if exists "documents_select" on public.documents;
+drop policy if exists "documents_insert" on public.documents;
+drop policy if exists "documents_update" on public.documents;
+drop policy if exists "documents_delete" on public.documents;
 
-CREATE POLICY "Users can delete their own embeddings"
-ON embeddings FOR DELETE
-USING (auth.uid() = user_id);
+-- 세션: 본인 데이터만 접근
+create policy "sessions_select_own"
+  on public.sessions for select to authenticated
+  using (auth.uid() = user_id);
 
-CREATE POLICY "Users can view their own sessions"
-ON sessions FOR SELECT
-USING (auth.uid() = user_id);
+create policy "sessions_insert_own"
+  on public.sessions for insert to authenticated
+  with check (auth.uid() = user_id);
 
-CREATE POLICY "Users can insert their own sessions"
-ON sessions FOR INSERT
-WITH CHECK (auth.uid() = user_id);
+create policy "sessions_update_own"
+  on public.sessions for update to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
 
-CREATE POLICY "Users can update their own sessions"
-ON sessions FOR UPDATE
-USING (auth.uid() = user_id);
+create policy "sessions_delete_own"
+  on public.sessions for delete to authenticated
+  using (auth.uid() = user_id);
 
-CREATE POLICY "Users can delete their own sessions"
-ON sessions FOR DELETE
-USING (auth.uid() = user_id);
+-- 메시지: 세션 소유자만 접근
+create policy "messages_select_session_owner"
+  on public.messages for select to authenticated
+  using (
+    exists (
+      select 1
+      from public.sessions s
+      where s.id = messages.session_id
+        and s.user_id = auth.uid()
+    )
+  );
 
--- 10. updated_at 자동 업데이트 트리거
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+create policy "messages_insert_session_owner"
+  on public.messages for insert to authenticated
+  with check (
+    exists (
+      select 1
+      from public.sessions s
+      where s.id = messages.session_id
+        and s.user_id = auth.uid()
+    )
+  );
 
--- 기존 트리거가 있으면 삭제
-DROP TRIGGER IF EXISTS update_sessions_updated_at ON sessions;
+create policy "messages_update_session_owner"
+  on public.messages for update to authenticated
+  using (
+    exists (
+      select 1
+      from public.sessions s
+      where s.id = messages.session_id
+        and s.user_id = auth.uid()
+    )
+  )
+  with check (
+    exists (
+      select 1
+      from public.sessions s
+      where s.id = messages.session_id
+        and s.user_id = auth.uid()
+    )
+  );
 
--- 트리거 생성
-CREATE TRIGGER update_sessions_updated_at
-BEFORE UPDATE ON sessions
-FOR EACH ROW
-EXECUTE FUNCTION update_updated_at_column();
+create policy "messages_delete_session_owner"
+  on public.messages for delete to authenticated
+  using (
+    exists (
+      select 1
+      from public.sessions s
+      where s.id = messages.session_id
+        and s.user_id = auth.uid()
+    )
+  );
 
+-- 문서: user_id(text)와 auth.uid()를 문자열 비교
+create policy "documents_select_own"
+  on public.documents for select to authenticated
+  using (user_id = auth.uid()::text);
+
+create policy "documents_insert_own"
+  on public.documents for insert to authenticated
+  with check (user_id = auth.uid()::text);
+
+create policy "documents_update_own"
+  on public.documents for update to authenticated
+  using (user_id = auth.uid()::text)
+  with check (user_id = auth.uid()::text);
+
+create policy "documents_delete_own"
+  on public.documents for delete to authenticated
+  using (user_id = auth.uid()::text);
