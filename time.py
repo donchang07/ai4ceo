@@ -1,4 +1,8 @@
-"""실시간 디지털 시계 (Streamlit). 통합 앱(one.py)에서는 render_app()만 호출됩니다."""
+"""실시간 디지털 시계 (Streamlit).
+
+통합 앱(one.py)은 importlib로 이 모듈을 로드하여 render_app()만 호출합니다.
+표준 라이브러리 time과의 충돌을 피하기 위해 time as time_module 로 임포트합니다.
+"""
 
 from __future__ import annotations
 
@@ -10,49 +14,49 @@ import streamlit as st
 
 def render_app() -> None:
     now = datetime.now()
-    date_text = now.strftime("%Y-%m-%d (%a)")
+    date_text = now.strftime("%Y년 %m월 %d일 (%a)")
     time_text = now.strftime("%H:%M:%S")
 
     st.markdown(
-        """
-        <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap" rel="stylesheet">
+        f"""
+        <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@700&display=swap" rel="stylesheet">
         <style>
-            .clock-root {
+            .stApp {{
                 background-color: #000000;
-                min-height: 320px;
+            }}
+            .clock-wrap {{
+                position: fixed;
+                top: 4rem;
+                left: 50%;
+                transform: translateX(-50%);
                 width: 100%;
                 display: flex;
                 flex-direction: column;
                 align-items: center;
-                justify-content: flex-start;
-                padding-top: 2.5rem;
-                box-sizing: border-box;
-            }
-            .clock-date {
-                font-family: 'Orbitron', monospace;
-                font-size: 1.35rem;
+                justify-content: center;
+                z-index: 9999;
+                pointer-events: none;
+            }}
+            .clock-date {{
+                font-family: 'Share Tech Mono', 'Orbitron', monospace;
+                font-size: 2rem;
                 color: #ffff00;
-                letter-spacing: 0.12em;
-                margin-bottom: 1rem;
-                text-align: center;
-            }
-            .clock-time {
-                font-family: 'Orbitron', monospace;
-                font-size: clamp(2rem, 6vw, 3.5rem);
+                letter-spacing: 0.15em;
+                margin-bottom: 1.2rem;
+                text-shadow: 0 0 8px rgba(255, 255, 0, 0.4);
+            }}
+            .clock-time {{
+                font-family: 'Share Tech Mono', 'Orbitron', monospace;
+                font-size: clamp(3rem, 9vw, 6rem);
                 font-weight: 700;
                 color: #00ff00;
-                letter-spacing: 0.18em;
-                text-align: center;
-                text-shadow: 0 0 12px rgba(0, 255, 0, 0.45);
-            }
+                letter-spacing: 0.2em;
+                text-shadow: 0 0 18px rgba(0, 255, 0, 0.6);
+            }}
         </style>
-        <div class="clock-root">
-            <div class="clock-date">"""
-        + date_text
-        + """</div>
-            <div class="clock-time">"""
-        + time_text
-        + """</div>
+        <div class="clock-wrap">
+            <div class="clock-date">{date_text}</div>
+            <div class="clock-time">{time_text}</div>
         </div>
         """,
         unsafe_allow_html=True,
